@@ -572,6 +572,36 @@ def has_pd4ml_available(cfg: Dict[str, str]) -> bool:
     return bool(sorted(Path.cwd().glob("pd4ml*.jar")))
 
 
+def token_help_text(token: str) -> str:
+    tips = {
+        "@parent.txt_FSName@": "Nome do fundo/organizacao principal. Pense como o titulo da pasta no SmartSimple.",
+        "@parent.txt_FSAddress@": "Endereco principal do fundo/organizacao.",
+        "@parent.txt_FSCountry@": "Pais do fundo/organizacao.",
+        "@parent.txt_FSPrimaryContact@": "Pessoa de contato principal.",
+        "@parent.txt_FSTitle@": "Cargo da pessoa de contato.",
+        "@parent.txt_FSEmail@": "Email da pessoa de contato.",
+        "@parent.txt_DDSignatoryName@": "Nome da pessoa que assina pelo parceiro.",
+        "@parent.txt_DDSignatoryOrganization@": "Nome da organizacao parceira que assina.",
+        "@parent.txt_DDSignatoryTitle@": "Cargo de quem assina pelo parceiro.",
+        "@parent.txt_DDSignatoryEmail@": "Email de quem assina pelo parceiro.",
+        "@parent.startdate@": "Data de inicio do acordo.",
+        "@parent.enddate@": "Data de encerramento do acordo.",
+        "@parent.date_MidTermCheckIn@": "Data prevista para o check-in de meio de periodo.",
+        "@parent.date_FinalReportDue@": "Data limite para o relatorio final.",
+        "@parent.txt_InvitationAmount@": "Valor total do grant/convite. O app usa isso para calcular installments.",
+        "@parent.txt_AmountInWords@": "Valor total por extenso, como aparece no texto final.",
+        "@parent.numberinstallments@": "Numero de parcelas. O app divide o total automaticamente.",
+        "@logourl@": "Logo principal no cabecalho do documento.",
+        "@secondarylogourl@": "Segunda logo no cabecalho. Pode usar [INSERIR LINK] por enquanto.",
+    }
+    if token in tips:
+        return tips[token]
+    return (
+        "Este campo preenche um espaco do template, igual aos placeholders do SmartSimple. "
+        "Se ficar vazio, o marcador original sera mantido."
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="SmartSimple Local PDF Builder", layout="wide")
     st.title("SmartSimple Local PDF Builder")
@@ -613,10 +643,19 @@ def main() -> None:
         st.subheader("Variaveis")
         overrides: Dict[str, str] = {}
         with st.expander("Editar placeholders", expanded=True):
+            st.info(
+                "Dica: cada campo abaixo e como um espaco em branco de um formulario no SmartSimple. "
+                "Passe o mouse no icone de ajuda para entender o que preencher."
+            )
             defaults = resolve_token_values(tokens, cfg, {}, repo_root)
             for token in tokens:
                 label = f"{token} ({to_env_key(token)})"
-                value = st.text_input(label, value=defaults.get(token, ""), key=f"token_{token}")
+                value = st.text_input(
+                    label,
+                    value=defaults.get(token, ""),
+                    key=f"token_{token}",
+                    help=token_help_text(token),
+                )
                 overrides[token] = value
 
         pd4ml_enabled = has_pd4ml_available(cfg)
@@ -631,7 +670,7 @@ def main() -> None:
         st.error(str(err))
         st.stop()
 
-    tab_html, tab_preview = st.tabs(["HTML processado", "Preview"])
+    tab_html, tab_preview, tab_help = st.tabs(["HTML processado", "Preview", "Como funciona"])
 
     with tab_html:
         st.subheader("HTML processado")
@@ -676,6 +715,46 @@ def main() -> None:
                 file_name=Path(selected_name).stem + ".rendered.html",
                 mime="text/html",
                 use_container_width=True,
+            )
+
+    with tab_help:
+        st.subheader("Guia rapido")
+        st.markdown(
+            """
+            Este app funciona como uma mesa de preparacao antes do SmartSimple.
+
+            1. Voce envia um arquivo HTML, como se estivesse trazendo um rascunho de contrato.
+            2. O app encontra os \"espacos em branco\" (ex.: `@parent...@`) e mostra os campos na lateral.
+            3. Voce preenche os dados e clica em visualizar.
+            4. O app monta uma versao pronta para revisao.
+
+            Pense assim: no SmartSimple, os dados entram no documento na hora de gerar. Aqui, voce faz esse ensaio antes da producao.
+            """
+        )
+
+        st.subheader("O que acontece com as variaveis")
+        st.info(
+            "Se um campo estiver preenchido, ele entra no documento. "
+            "Se ficar vazio, o marcador original permanece para voce identificar o que ainda falta."
+        )
+
+        st.subheader("Logos")
+        st.markdown(
+            """
+            - A logo principal usa `@logourl@`.
+            - A segunda logo usa `@secondarylogourl@`.
+            - Se voce ainda nao tiver o link final, pode manter `[INSERIR LINK]`.
+            """
+        )
+
+        st.subheader("Preview")
+        if has_pd4ml_available(cfg):
+            st.success(
+                "Com PD4ML configurado, o preview e em PDF, bem proximo do que voce ve no SmartSimple."
+            )
+        else:
+            st.warning(
+                "Sem PD4ML/Java, o preview e em HTML. Serve para revisar texto e variaveis antes da etapa final."
             )
 
 
