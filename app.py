@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import calendar
+import mimetypes
 import re
 import shlex
 import subprocess
@@ -24,6 +25,8 @@ INSTALLMENT_MARKER = "<!--VALOR DOS INSTALMENTS AQUI-->"
 
 
 DEFAULT_TOKEN_VALUES = {
+    "@TITLE@": "SmartSimple Local Preview",
+    "@STYLELINK@": "",
     "@parent.txt_FSName@": "Global Equality Fund",
     "@parent.txt_FSAddress@": "123 Impact Avenue, 10001",
     "@parent.txt_FSCountry@": "Netherlands",
@@ -45,6 +48,63 @@ DEFAULT_TOKEN_VALUES = {
     "@logourl@": "[INSERIR LINK]",
     "@secondarylogourl@": "[INSERIR LINK]",
 }
+
+SMARTSIMPLE_BASE_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+<title>@TITLE@</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+@STYLELINK@
+<style type="text/css">
+html { background-color: #FFFFFF; }
+.header_container_left { padding-left: 20px; padding-right: 20px; }
+#header_container_in { padding-top: 10px; padding-bottom: 10px; }
+#navtitle {
+width: 320px; padding-top: 15px; text-align: left; white-space: normal; word-break: break-word; float: left;
+}
+body {
+font-family: 'Roboto',Helvetica, Arial, Sans-Serif, 'Arial Unicode MS',FreeSans;
+background-color: #FFFFFF;
+}
+.overflow { width: 700px; word-wrap: break-word; }
+.wpvwrapper { margin-top: 10px; }
+tr { PAGE-BREAK-inside: avoid; }
+.header_logo {
+margin-right: 20px !important;
+max-height: 42px;
+width: auto;
+height: auto;
+vertical-align: top;
+}
+</style>
+</head>
+<body bgcolor="#FFFFFF">
+<pd4ml:page.header>
+<table width="700px" border="0" cellspacing="0" cellpadding="0" align="center" class="wpvwrapper">
+<tr>
+<td><div class="overflow">
+<div id="header_container">
+<div id="header_container_in" class="centerlayout">
+<div class="header_container_left"><img class="header_logo" id="header_logo_sm" src="@logourl@" border="0" alt="Logo" valign="top" align="left" onerror="this.onerror=null; this.src='/images/blank.gif'"> <div id="navtitle"></div></div>
+</div>
+</div>
+</div></td>
+</tr>
+<tr><td height="20px"> </td></tr>
+</table>
+</pd4ml:page.header>
+<pd4ml:page.footer>
+<div style="pd4ml-display:block;display:none;margin-top: 30px;margin-left:30px;margin-right:30px;margin-bottom:30px">
+<table width="700px" align="center">
+<tr><td style="text-align:right">Page $[page] of $[total]</td></tr>
+</table>
+</div>
+</pd4ml:page.footer>
+{{CONTENT}}
+</body>
+</html>
+"""
 
 
 @dataclass
@@ -478,6 +538,26 @@ def inject_secondary_logo_if_needed(html: str) -> str:
     return html
 
 
+def enforce_header_logo_size(html: str) -> str:
+    def add_or_replace_style(match: re.Match[str]) -> str:
+        tag = match.group(0)
+        style_rule = "max-height:42px;width:auto;height:auto;vertical-align:top;"
+        style_match = re.search(r'style="([^"]*)"', tag, re.IGNORECASE)
+        if style_match:
+            current = style_match.group(1).strip()
+            merged = current
+            if "max-height" not in current.lower():
+                merged = f"{merged};{style_rule}" if merged else style_rule
+            return re.sub(r'style="([^"]*)"', f'style="{merged}"', tag, flags=re.IGNORECASE)
+        return tag[:-1] + f' style="{style_rule}">'
+
+    pattern = re.compile(
+        r'<img[^>]+(?:id="header_logo_sm"|id="header_logo_secondary")[^>]*>',
+        re.IGNORECASE,
+    )
+    return pattern.sub(add_or_replace_style, html)
+
+
 def apply_installments(html: str, values: Dict[str, str]) -> str:
     if INSTALLMENT_MARKER not in html:
         return html
@@ -508,6 +588,7 @@ def apply_installments(html: str, values: Dict[str, str]) -> str:
 
 def render_html(raw_html: str, values: Dict[str, str]) -> RenderResult:
     html = inject_secondary_logo_if_needed(raw_html)
+    html = enforce_header_logo_size(html)
     html = process_sslogic(html, values)
     html = process_sscalculation(html, values)
     html = apply_installments(html, values)
@@ -572,8 +653,77 @@ def has_pd4ml_available(cfg: Dict[str, str]) -> bool:
     return bool(sorted(Path.cwd().glob("pd4ml*.jar")))
 
 
+def file_to_data_uri(path: Path) -> str:
+    mime, _ = mimetypes.guess_type(str(path))
+    if not mime:
+        mime = "application/octet-stream"
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{payload}"
+
+
+def normalize_logo_src(raw: str, repo_root: Path) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return value
+    if value.startswith("data:"):
+        return value
+    if value.startswith(("http://", "https://")):
+        return value
+    if value.startswith("file://"):
+        try:
+            local = Path(value[7:])
+            if local.exists():
+                return file_to_data_uri(local)
+        except Exception:
+            return value
+        return value
+
+    local = Path(value)
+    if not local.is_absolute():
+        local = repo_root / local
+    if local.exists():
+        return file_to_data_uri(local)
+    return value
+
+
+def normalize_html_for_browser_preview(html: str) -> str:
+    # pd4ml:* tags are SmartSimple/PD4ML specific; in browser preview we show their content as regular blocks.
+    out = html
+    out = re.sub(r"<\s*pd4ml:page\.header\s*>", '<div class="pd4ml-page-header">', out, flags=re.IGNORECASE)
+    out = re.sub(r"<\s*/\s*pd4ml:page\.header\s*>", "</div>", out, flags=re.IGNORECASE)
+    out = re.sub(r"<\s*pd4ml:page\.footer\s*>", '<div class="pd4ml-page-footer">', out, flags=re.IGNORECASE)
+    out = re.sub(r"<\s*/\s*pd4ml:page\.footer\s*>", "</div>", out, flags=re.IGNORECASE)
+    return out
+
+
+def extract_body_content(html: str) -> str:
+    match = re.search(r"<body[^>]*>(.*)</body>", html, re.IGNORECASE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return html
+
+
+def apply_smartsimple_base_template(raw_html: str, enabled: bool) -> str:
+    if not enabled:
+        return raw_html
+    content = extract_body_content(raw_html)
+    return SMARTSIMPLE_BASE_TEMPLATE.replace("{{CONTENT}}", content)
+
+
+def collect_sidebar_tokens(prepared_html: str) -> List[str]:
+    tokens = set(DEFAULT_TOKEN_VALUES.keys())
+    tokens.update(TOKEN_RE.findall(prepared_html))
+    tokens.add("@TITLE@")
+    tokens.add("@STYLELINK@")
+    tokens.add("@logourl@")
+    tokens.add("@secondarylogourl@")
+    return sorted(tokens)
+
+
 def token_help_text(token: str) -> str:
     tips = {
+        "@TITLE@": "Titulo do documento, como aparece na aba do navegador/PDF.",
+        "@STYLELINK@": "Campo para CSS externo, se voce quiser reaproveitar estilo do SmartSimple.",
         "@parent.txt_FSName@": "Nome do fundo/organizacao principal. Pense como o titulo da pasta no SmartSimple.",
         "@parent.txt_FSAddress@": "Endereco principal do fundo/organizacao.",
         "@parent.txt_FSCountry@": "Pais do fundo/organizacao.",
@@ -629,8 +779,16 @@ def main() -> None:
             st.warning("Selecione novamente o arquivo HTML.")
             st.stop()
 
-        raw_html = selected.getvalue().decode("utf-8", errors="ignore")
-        tokens = extract_placeholders(raw_html)
+        st.header("Modo")
+        use_base_template = st.checkbox(
+            "Usar template base SmartSimple",
+            value=True,
+            help="Ative para aplicar automaticamente cabecalho/rodape e estrutura base no estilo SmartSimple.",
+        )
+
+        uploaded_html = selected.getvalue().decode("utf-8", errors="ignore")
+        raw_html = apply_smartsimple_base_template(uploaded_html, use_base_template)
+        tokens = collect_sidebar_tokens(raw_html)
 
         st.header("Configuracao")
         pd4ml_template = st.text_input(
@@ -663,6 +821,8 @@ def main() -> None:
         preview = st.button(preview_label, type="primary", use_container_width=True)
 
     values = resolve_token_values(tokens, cfg, overrides, repo_root)
+    values["@logourl@"] = normalize_logo_src(values.get("@logourl@", ""), repo_root)
+    values["@secondarylogourl@"] = normalize_logo_src(values.get("@secondarylogourl@", ""), repo_root)
 
     try:
         rendered = render_html(raw_html, values)
@@ -708,6 +868,7 @@ def main() -> None:
                 st.session_state["html_preview"] = rendered.html
 
             html_preview = st.session_state.get("html_preview", rendered.html)
+            html_preview = normalize_html_for_browser_preview(html_preview)
             render_html_document_preview(html_preview)
             st.download_button(
                 "Baixar HTML processado",
